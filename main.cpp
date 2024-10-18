@@ -111,9 +111,7 @@ extern "C" {
     void print_result(const char* s) {
         std::cout << "Resultado: " << s << std::endl;
     }
-}
 
-extern "C" {
     double evaluateExpression(const char* op, const char* lhs, const char* rhs);
     void printResult(double result);
 }
@@ -182,128 +180,117 @@ llvm::Value *AST::BinaryExpr::codegen() {
 // Función para procesar expresiones
 void processLine(const std::string &line) {
     if (line[0] == '?') {
-        // Process expression
+        // Procesar expresión
         std::istringstream iss(line.substr(1));
         std::string expr;
         std::getline(iss >> std::ws, expr);
 
-        // Split the expression into parts
+        // Dividir la expresión en partes
         std::istringstream expr_stream(expr);
         std::string lhs, rhs;
         char op = 0;
         expr_stream >> lhs;
         if (expr_stream >> op >> rhs) {
-            // Binary expression
+            // Expresión binaria
             if (NamedValues.find(lhs) == NamedValues.end() || NamedValues.find(rhs) == NamedValues.end()) {
-                std::cerr << "Undefined variable.\n";
+                std::cerr << "Variable no definida.\n";
                 return;
             }
 
-            // Create AST for the binary expression
+            // Crear AST para la expresión binaria
             auto LHS = std::make_unique<AST::VariableExpr>(lhs);
             auto RHS = std::make_unique<AST::VariableExpr>(rhs);
             auto Expr = std::make_unique<AST::BinaryExpr>(op, std::move(LHS), std::move(RHS));
 
-            // Generate code for the expression
+            // Generar código para la expresión
             llvm::FunctionType *FT = llvm::FunctionType::get(llvm::Type::getVoidTy(TheContext), false);
-            llvm::Function *F = llvm::Function::Create(FT, llvm::Function::ExternalLinkage, "example", TheModule.get());
+            llvm::Function *F = llvm::Function::Create(FT, llvm::Function::ExternalLinkage, 
+                "example_func", TheModule.get());
 
             llvm::BasicBlock *BB = llvm::BasicBlock::Create(TheContext, "entry", F);
             Builder.SetInsertPoint(BB);
 
             llvm::Value *Result = Expr->codegen();
             
-if (Result) {
-        // Call runtime function to print the result
-        llvm::Function *PrintFunc = TheModule->getFunction("print_result");
-        if (!PrintFunc) {
-            llvm::FunctionType *PrintFT = llvm::FunctionType::get(llvm::Type::getVoidTy(TheContext), {llvm::Type::getInt8PtrTy(TheContext)}, false);
-            PrintFunc = llvm::Function::Create(PrintFT, llvm::Function::ExternalLinkage, "print_result", TheModule.get());
-        }
-        Builder.CreateCall(PrintFunc, {Result});
-        Builder.CreateRetVoid();
-
-        // Verify the generated function
-        if (llvm::verifyFunction(*F, &llvm::errs())) {
-            std::cerr << "Error: Invalid function generated\n";
-            F->eraseFromParent();
-            return;
-        }
-
-        // Print the generated IR
-        TheModule->print(llvm::outs(), nullptr);
-
-        std::cout << "Finalizing object..." << std::endl;
-        TheExecutionEngine->finalizeObject();
-
-        std::cout << "Retrieving function..." << std::endl;
-        llvm::Function *CompiledF = TheExecutionEngine->FindFunctionNamed("example");
-        if (!CompiledF) {
-            std::cerr << "Error: Failed to retrieve compiled function\n";
-            
-            // Print all function names in the module
-            std::cout << "Functions in the module:" << std::endl;
-            for (auto &Func : TheModule->getFunctionList()) {
-                std::cout << Func.getName().str() << std::endl;
+            // Llamar a print_result
+            llvm::Function *PrintFunc = TheModule->getFunction("print_result");
+            if (!PrintFunc) {
+                llvm::FunctionType *PrintFT = llvm::FunctionType::get(
+                    llvm::Type::getVoidTy(TheContext), 
+                    {llvm::Type::getInt8PtrTy(TheContext)}, 
+                    false);
+                PrintFunc = llvm::Function::Create(PrintFT, 
+                    llvm::Function::ExternalLinkage, 
+                    "print_result", 
+                    TheModule.get());
             }
+            Builder.CreateCall(PrintFunc, {Result});
+            Builder.CreateRetVoid();
+
+            // Verificar la función generada
+            llvm::verifyFunction(*F);
+
+            // Imprimir el IR generado
+            TheModule->print(llvm::outs(), nullptr);
+
+            // Finalizar el objeto y obtener un puntero a la función compilada
+            TheExecutionEngine->finalizeObject();
             
-            return;
-        }
+            // Obtener un puntero a la función compilada
+            void (*FP)() = (void (*)())(intptr_t)
+                TheExecutionEngine->getFunctionAddress("example_func");
+                
+            if (FP) {
+                // Ejecutar la función
+                FP();
+            } else {
+                std::cerr << "Error: No se pudo obtener la función compilada\n";
+            }
 
-        std::cout << "Running function..." << std::endl;
-        std::vector<llvm::GenericValue> NoArgs;
-        TheExecutionEngine->runFunction(CompiledF, NoArgs);
-
-        // Remove the function from the module to avoid name conflicts in future compilations
-        F->eraseFromParent();
-    } else {
-        std::cerr << "Error: Failed to generate code for expression\n";
-        F->eraseFromParent();
-    }
         } else {
-            // Single variable expression
+            // Expresión de una sola variable
             if (NamedValues.find(lhs) == NamedValues.end()) {
-                std::cerr << "Undefined variable.\n";
+                std::cerr << "Variable no definida.\n";
                 return;
             }
 
-            // Print the variable's value
+            // Imprimir el valor de la variable
             const Value& val = NamedValues[lhs];
             if (val.type == Value::Number) {
-                std::cout << "Value of " << lhs << ": " << val.numVal << std::endl;
+                std::cout << "Valor de " << lhs << ": " << val.numVal << std::endl;
             } else {
-                std::cout << "Value of " << lhs << ": \"" << *val.strVal << "\"" << std::endl;
+                std::cout << "Valor de " << lhs << ": \"" << *val.strVal << "\"" << std::endl;
             }
         }
     } else {
-        // Variable assignment
+        // Asignación de variable
         std::istringstream iss(line);
         std::string name;
         std::string equals;
         std::string value;
         
         if (!(iss >> name >> equals >> value) || equals != "=") {
-            std::cerr << "Invalid assignment format.\n";
+            std::cerr << "Formato de asignación inválido.\n";
             return;
         }
 
-        // Determine if the value is a number or a string
+        // Determinar si el valor es un número o una cadena
         try {
             double numVal = std::stod(value);
             NamedValues[name] = Value(numVal);
-            std::cout << "Assigned " << name << " = " << numVal << std::endl;
+            std::cout << "Asignado " << name << " = " << numVal << std::endl;
         } catch (const std::invalid_argument&) {
-            // If not a number, assume it's a string
+            // Si no es un número, asumimos que es una cadena
             if (value.front() == '"' && value.back() == '"') {
-                // Remove the quotes
+                // Eliminar las comillas
                 value = value.substr(1, value.length() - 2);
                 NamedValues[name] = Value(value);
-                std::cout << "Assigned " << name << " = \"" << value << "\"" << std::endl;
+                std::cout << "Asignado " << name << " = \"" << value << "\"" << std::endl;
             } else {
-                std::cerr << "Invalid string value. Must be enclosed in quotes.\n";
+                std::cerr << "Valor de cadena inválido. Debe estar entre comillas.\n";
             }
         } catch (const std::out_of_range&) {
-            std::cerr << "Number out of range.\n";
+            std::cerr << "Número fuera de rango.\n";
         }
     }
 }
