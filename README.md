@@ -1,2 +1,2 @@
 # xbase-llvm
-xbase compiler based ol llvm
+xbase compiler based on llvm
