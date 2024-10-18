@@ -177,118 +177,192 @@ llvm::Value *AST::BinaryExpr::codegen() {
     }
 }
 
-// Función para procesar expresiones
+// Función auxiliar para eliminar espacios en blanco al inicio y final de una cadena
+std::string trim(const std::string& str) {
+    size_t first = str.find_first_not_of(' ');
+    if (std::string::npos == first) {
+        return str;
+    }
+    size_t last = str.find_last_not_of(' ');
+    return str.substr(first, (last - first + 1));
+}
+
 void processLine(const std::string &line) {
     if (line[0] == '?') {
-        std::istringstream iss(line.substr(1));
-        std::string expr;
-        std::getline(iss >> std::ws, expr);
-
-        std::istringstream expr_stream(expr);
-        std::string lhs, rhs;
-        char op = 0;
-        expr_stream >> lhs;
-        if (expr_stream >> op >> rhs) {
-            if (NamedValues.find(lhs) == NamedValues.end() || NamedValues.find(rhs) == NamedValues.end()) {
-                std::cerr << "Variable no definida.\n";
-                return;
-            }
-
-            // Crear un nuevo módulo para esta expresión
-            TheModule = std::make_unique<llvm::Module>("xBase Compiler", TheContext);
-            
-            // Recrear las declaraciones de las funciones externas
-            llvm::FunctionType *ConcatFT = llvm::FunctionType::get(
-                llvm::Type::getInt8PtrTy(TheContext),
-                {llvm::Type::getInt8PtrTy(TheContext), llvm::Type::getInt8PtrTy(TheContext)},
-                false);
-            llvm::Function::Create(ConcatFT, llvm::Function::ExternalLinkage,
-                                 "concat_strings", TheModule.get());
-
-            llvm::FunctionType *PrintFT = llvm::FunctionType::get(
-                llvm::Type::getVoidTy(TheContext),
-                {llvm::Type::getInt8PtrTy(TheContext)},
-                false);
-            llvm::Function::Create(PrintFT, llvm::Function::ExternalLinkage,
-                                 "print_result", TheModule.get());
-
-            // Crear AST y generar código
-            auto LHS = std::make_unique<AST::VariableExpr>(lhs);
-            auto RHS = std::make_unique<AST::VariableExpr>(rhs);
-            auto Expr = std::make_unique<AST::BinaryExpr>(op, std::move(LHS), std::move(RHS));
-
-            llvm::FunctionType *FT = llvm::FunctionType::get(llvm::Type::getVoidTy(TheContext), false);
-            llvm::Function *F = llvm::Function::Create(FT, llvm::Function::ExternalLinkage,
-                "example_func", TheModule.get());
-
-            llvm::BasicBlock *BB = llvm::BasicBlock::Create(TheContext, "entry", F);
-            Builder.SetInsertPoint(BB);
-
-            llvm::Value *Result = Expr->codegen();
-            Builder.CreateCall(TheModule->getFunction("print_result"), {Result});
-            Builder.CreateRetVoid();
-
-            // Verificar y mostrar el IR
-            llvm::verifyFunction(*F);
-            TheModule->print(llvm::outs(), nullptr);
-
-            // Añadir el módulo al motor de ejecución
-            TheExecutionEngine->addModule(std::move(TheModule));
-            TheExecutionEngine->finalizeObject();
-
-            // Obtener y ejecutar la función
-            uint64_t FPtr = TheExecutionEngine->getFunctionAddress("print_result");
-            if (FPtr) {
-                void (*FP)() = (void (*)())(intptr_t)FPtr;
-                FP();
-                
-                // Remover el módulo después de la ejecución
-                // TheExecutionEngine->removeModule(H);
+        std::string expr = trim(line.substr(1));
+        
+        // Tokenizar la expresión
+        std::vector<std::string> tokens;
+        std::string current_token;
+        for (char c : expr) {
+            if (c == ' ') {
+                if (!current_token.empty()) {
+                    tokens.push_back(current_token);
+                    current_token.clear();
+                }
+            } else if (c == '+' || c == '-' || c == '*' || c == '/') {
+                if (!current_token.empty()) {
+                    tokens.push_back(current_token);
+                    current_token.clear();
+                }
+                tokens.push_back(std::string(1, c));
             } else {
-                std::cerr << "Error: No se pudo obtener la función compilada\n";
-            }
-
-            // Crear un nuevo módulo para la siguiente operación
-            TheModule = std::make_unique<llvm::Module>("xBase Compiler", TheContext);
-
-        } else {
-            // Código para expresión de una sola variable (sin cambios)
-            if (NamedValues.find(lhs) == NamedValues.end()) {
-                std::cerr << "Variable no definida.\n";
-                return;
-            }
-
-            const Value& val = NamedValues[lhs];
-            if (val.type == Value::Number) {
-                std::cout << "Valor de " << lhs << ": " << val.numVal << std::endl;
-            } else {
-                std::cout << "Valor de " << lhs << ": \"" << *val.strVal << "\"" << std::endl;
+                current_token += c;
             }
         }
-    } else {
-        // Código para asignación de variables (sin cambios)
-        std::istringstream iss(line);
-        std::string name;
-        std::string equals;
-        std::string value;
+        if (!current_token.empty()) {
+            tokens.push_back(current_token);
+        }
+
+        std::cout << "Tokens: ";
+        for (const auto& token : tokens) {
+            std::cout << "'" << token << "' ";
+        }
+        std::cout << std::endl;
+
+        // Verificar que todas las variables estén definidas
+        for (const auto& token : tokens) {
+            if (token != "+" && token != "-" && token != "*" && token != "/" &&
+                (token.front() != '"' || token.back() != '"') &&
+                NamedValues.find(token) == NamedValues.end()) {
+                std::cerr << "Variable no definida: " << token << std::endl;
+                return;
+            }
+        }
+
+        // Crear un nuevo módulo para esta expresión
+        TheModule = std::make_unique<llvm::Module>("xBase Compiler", TheContext);
         
-        if (!(iss >> name >> equals >> value) || equals != "=") {
+        // Recrear las declaraciones de las funciones externas
+        llvm::FunctionType *ConcatFT = llvm::FunctionType::get(
+            llvm::Type::getInt8PtrTy(TheContext),
+            {llvm::Type::getInt8PtrTy(TheContext), llvm::Type::getInt8PtrTy(TheContext)},
+            false);
+        llvm::Function::Create(ConcatFT, llvm::Function::ExternalLinkage,
+                             "concat_strings", TheModule.get());
+
+        llvm::FunctionType *PrintFT = llvm::FunctionType::get(
+            llvm::Type::getVoidTy(TheContext),
+            {llvm::Type::getInt8PtrTy(TheContext)},
+            false);
+        llvm::Function::Create(PrintFT, llvm::Function::ExternalLinkage,
+                             "print_result", TheModule.get());
+
+        // Crear AST y generar código
+        std::unique_ptr<AST::Expression> Expr;
+        for (size_t i = 0; i < tokens.size(); i++) {
+            if (tokens[i] == "+" || tokens[i] == "-" || tokens[i] == "*" || tokens[i] == "/") {
+                if (!Expr || i + 1 >= tokens.size()) {
+                    std::cerr << "Error de sintaxis: operador '" << tokens[i] << "' mal posicionado" << std::endl;
+                    return;
+                }
+                char op = tokens[i][0];
+                i++; // Avanzar al siguiente token
+                std::unique_ptr<AST::Expression> RHS;
+                if (tokens[i].front() == '"' && tokens[i].back() == '"') {
+                    RHS = std::make_unique<AST::StringExpr>(tokens[i].substr(1, tokens[i].length() - 2));
+                } else if (NamedValues.find(tokens[i]) != NamedValues.end()) {
+                    RHS = std::make_unique<AST::VariableExpr>(tokens[i]);
+                } else {
+                    try {
+                        double val = std::stod(tokens[i]);
+                        RHS = std::make_unique<AST::NumberExpr>(val);
+                    } catch (const std::invalid_argument&) {
+                        std::cerr << "Token inválido: " << tokens[i] << std::endl;
+                        return;
+                    }
+                }
+                Expr = std::make_unique<AST::BinaryExpr>(op, std::move(Expr), std::move(RHS));
+            } else {
+                std::unique_ptr<AST::Expression> Current;
+                if (tokens[i].front() == '"' && tokens[i].back() == '"') {
+                    Current = std::make_unique<AST::StringExpr>(tokens[i].substr(1, tokens[i].length() - 2));
+                } else if (NamedValues.find(tokens[i]) != NamedValues.end()) {
+                    Current = std::make_unique<AST::VariableExpr>(tokens[i]);
+                } else {
+                    try {
+                        double val = std::stod(tokens[i]);
+                        Current = std::make_unique<AST::NumberExpr>(val);
+                    } catch (const std::invalid_argument&) {
+                        std::cerr << "Token inválido: " << tokens[i] << std::endl;
+                        return;
+                    }
+                }
+                if (!Expr) {
+                    Expr = std::move(Current);
+                } else {
+                    std::cerr << "Error de sintaxis: se esperaba un operador" << std::endl;
+                    return;
+                }
+            }
+        }
+
+        if (!Expr) {
+            std::cerr << "Error: expresión vacía" << std::endl;
+            return;
+        }
+
+        llvm::FunctionType *FT = llvm::FunctionType::get(llvm::Type::getVoidTy(TheContext), false);
+        llvm::Function *F = llvm::Function::Create(FT, llvm::Function::ExternalLinkage,
+            "example_func", TheModule.get());
+
+        llvm::BasicBlock *BB = llvm::BasicBlock::Create(TheContext, "entry", F);
+        Builder.SetInsertPoint(BB);
+
+        llvm::Value *Result = Expr->codegen();
+        
+        // Crear la llamada a print_result
+        llvm::Function* printFunc = TheModule->getFunction("print_result");
+        if (!printFunc) {
+            std::cerr << "Error: print_result function not found\n";
+            return;
+        }
+        Builder.CreateCall(printFunc, Result);
+        Builder.CreateRetVoid();
+
+        // Verificar y mostrar el IR
+        llvm::verifyFunction(*F);
+        TheModule->print(llvm::outs(), nullptr);
+
+        // Añadir el módulo al motor de ejecución
+        TheExecutionEngine->addModule(std::move(TheModule));
+        TheExecutionEngine->finalizeObject();
+
+        // Ejecutar la función
+        TheExecutionEngine->runFunction(F, {});
+
+        // Crear un nuevo módulo para la siguiente operación
+        TheModule = std::make_unique<llvm::Module>("xBase Compiler", TheContext);
+    } else {
+        size_t equalPos = line.find('=');
+        if (equalPos == std::string::npos) {
             std::cerr << "Formato de asignación inválido.\n";
             return;
         }
 
+        std::string name = line.substr(0, equalPos);
+        std::string value = line.substr(equalPos + 1);
+
+        name = trim(name);
+        value = trim(value);
+
+        if (value.empty()) {
+            std::cerr << "Valor vacío.\n";
+            return;
+        }
+
         try {
-            double numVal = std::stod(value);
-            NamedValues[name] = Value(numVal);
-            std::cout << "Asignado " << name << " = " << numVal << std::endl;
-        } catch (const std::invalid_argument&) {
             if (value.front() == '"' && value.back() == '"') {
                 value = value.substr(1, value.length() - 2);
                 NamedValues[name] = Value(value);
                 std::cout << "Asignado " << name << " = \"" << value << "\"" << std::endl;
             } else {
-                std::cerr << "Valor de cadena inválido. Debe estar entre comillas.\n";
+                double numVal = std::stod(value);
+                NamedValues[name] = Value(numVal);
+                std::cout << "Asignado " << name << " = " << numVal << std::endl;
             }
+        } catch (const std::invalid_argument&) {
+            std::cerr << "Valor inválido. Los strings deben estar entre comillas y los números deben ser válidos.\n";
         } catch (const std::out_of_range&) {
             std::cerr << "Número fuera de rango.\n";
         }
