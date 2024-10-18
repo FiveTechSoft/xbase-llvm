@@ -8,6 +8,7 @@
 #include <map>
 #include <memory>
 #include <cstdlib> // Para usar system()
+#include <sstream>
 
 // Definición expandida de un AST para xBase
 namespace AST {
@@ -22,6 +23,7 @@ namespace AST {
     public:
         NumberExpr(double Val) : Val(Val) {}
         llvm::Value *codegen() override;
+        double getVal() const { return Val; }
     };
 
     class VariableExpr : public Expression {
@@ -29,6 +31,7 @@ namespace AST {
     public:
         VariableExpr(const std::string &Name) : Name(Name) {}
         llvm::Value *codegen() override;
+        const std::string &getName() const { return Name; }
     };
 
     class BinaryExpr : public Expression {
@@ -41,22 +44,13 @@ namespace AST {
         llvm::Value *codegen() override;
     };
 
-    class CallExpr : public Expression {
-        std::string Callee;
-        std::vector<std::unique_ptr<Expression>> Args;
-    public:
-        CallExpr(const std::string &Callee,
-                 std::vector<std::unique_ptr<Expression>> Args)
-            : Callee(Callee), Args(std::move(Args)) {}
-        llvm::Value *codegen() override;
-    };
 }
 
 // Contexto global de LLVM
 static llvm::LLVMContext TheContext;
 static llvm::IRBuilder<> Builder(TheContext);
 static std::unique_ptr<llvm::Module> TheModule;
-static std::map<std::string, llvm::Value*> NamedValues;
+static std::map<std::string, double> NamedValues;
 
 // Implementaciones de codegen
 llvm::Value *AST::NumberExpr::codegen() {
@@ -64,10 +58,10 @@ llvm::Value *AST::NumberExpr::codegen() {
 }
 
 llvm::Value *AST::VariableExpr::codegen() {
-    llvm::Value *V = NamedValues[Name];
-    if (!V)
-        throw std::runtime_error("Unknown variable name");
-    return V;
+    if (NamedValues.find(Name) == NamedValues.end()) {
+        throw std::runtime_error("Unknown variable name: " + Name);
+    }
+    return llvm::ConstantFP::get(TheContext, llvm::APFloat(NamedValues[Name]));
 }
 
 llvm::Value *AST::BinaryExpr::codegen() {
@@ -90,54 +84,77 @@ llvm::Value *AST::BinaryExpr::codegen() {
     }
 }
 
-llvm::Value *AST::CallExpr::codegen() {
-    llvm::Function *CalleeF = TheModule->getFunction(Callee);
-    if (!CalleeF)
-        throw std::runtime_error("Unknown function referenced");
+// Función para procesar expresiones tipo "x = 5" o "? x + y"
+void processLine(const std::string &line) {
+    if (line[0] == '?') {
+        // Procesar expresión
+        std::istringstream iss(line.substr(1));
+        std::string lhs, rhs;
+        char op;
+        iss >> lhs >> op >> rhs;
 
-    if (CalleeF->arg_size() != Args.size())
-        throw std::runtime_error("Incorrect # arguments passed");
+        if (NamedValues.find(lhs) == NamedValues.end() || NamedValues.find(rhs) == NamedValues.end()) {
+            std::cerr << "Variable no definida.\n";
+            return;
+        }
 
-    std::vector<llvm::Value *> ArgsV;
-    for (unsigned i = 0, e = Args.size(); i != e; ++i) {
-        ArgsV.push_back(Args[i]->codegen());
-        if (!ArgsV.back())
-            return nullptr;
+        // Crear AST para la expresión
+        auto LHS = std::make_unique<AST::VariableExpr>(lhs);
+        auto RHS = std::make_unique<AST::VariableExpr>(rhs);
+        auto Expr = std::make_unique<AST::BinaryExpr>(op, std::move(LHS), std::move(RHS));
+
+        // Generar código para la expresión
+        llvm::FunctionType *FT = llvm::FunctionType::get(llvm::Type::getDoubleTy(TheContext), false);
+        llvm::Function *F = llvm::Function::Create(FT, llvm::Function::ExternalLinkage, "example", TheModule.get());
+
+        llvm::BasicBlock *BB = llvm::BasicBlock::Create(TheContext, "entry", F);
+        Builder.SetInsertPoint(BB);
+
+        llvm::Value *RetVal = Expr->codegen();
+        Builder.CreateRet(RetVal);
+
+        // Verificar el módulo generado
+        llvm::verifyFunction(*F);
+
+        // Imprimir el IR generado
+        TheModule->print(llvm::outs(), nullptr);
+    } else {
+        // Procesar asignación "x = 5"
+        std::istringstream iss(line);
+        std::string varName;
+        char eq;
+        double val;
+        iss >> varName >> eq >> val;
+
+        if (eq == '=') {
+            NamedValues[varName] = val;
+            std::cout << "Variable " << varName << " asignada con valor " << val << "\n";
+        } else {
+            std::cerr << "Error de sintaxis.\n";
+        }
     }
-
-    return Builder.CreateCall(CalleeF, ArgsV, "calltmp");
 }
 
 // Función principal del compilador
 int main() {
     TheModule = std::make_unique<llvm::Module>("xBase Compiler", TheContext);
 
-    // Entrada interactiva
-    std::cout << "Escribe una expresión binaria (ejemplo: 3.0 + 4.5): ";
-    double lhs, rhs;
-    char op;
-    std::cin >> lhs >> op >> rhs;
+    std::string line;
+    std::cout << "Escribe expresiones como 'x = 5' o '? x + y'. Escribe 'exit' para salir.\n";
+    while (true) {
+        std::cout << "> ";
+        std::getline(std::cin, line);
 
-    // Crear AST para la expresión ingresada
-    auto LHS = std::make_unique<AST::NumberExpr>(lhs);
-    auto RHS = std::make_unique<AST::NumberExpr>(rhs);
-    auto Expr = std::make_unique<AST::BinaryExpr>(op, std::move(LHS), std::move(RHS));
+        if (line == "exit") {
+            break;
+        }
 
-    // Generar código para la expresión
-    llvm::FunctionType *FT = llvm::FunctionType::get(llvm::Type::getDoubleTy(TheContext), false);
-    llvm::Function *F = llvm::Function::Create(FT, llvm::Function::ExternalLinkage, "example", TheModule.get());
-
-    llvm::BasicBlock *BB = llvm::BasicBlock::Create(TheContext, "entry", F);
-    Builder.SetInsertPoint(BB);
-
-    llvm::Value *RetVal = Expr->codegen();
-    Builder.CreateRet(RetVal);
-
-    // Verificar el módulo generado
-    llvm::verifyFunction(*F);
-
-    // Imprimir el IR generado
-    TheModule->print(llvm::outs(), nullptr);
+        try {
+            processLine(line);
+        } catch (const std::exception &e) {
+            std::cerr << "Error: " << e.what() << "\n";
+        }
+    }
 
     return 0;
 }
