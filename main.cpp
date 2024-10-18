@@ -6,6 +6,8 @@
 #include <vector>
 #include <string>
 #include <map>
+#include <memory>
+#include <cstdlib> // Para usar system()
 
 // Definición expandida de un AST para xBase
 namespace AST {
@@ -110,21 +112,25 @@ llvm::Value *AST::CallExpr::codegen() {
 int main() {
     TheModule = std::make_unique<llvm::Module>("xBase Compiler", TheContext);
 
-    // Ejemplo de generación de código para una función simple
-    llvm::FunctionType *FT = 
-        llvm::FunctionType::get(llvm::Type::getDoubleTy(TheContext), false);
-    llvm::Function *F = 
-        llvm::Function::Create(FT, llvm::Function::ExternalLinkage, "example", TheModule.get());
+    // Entrada interactiva
+    std::cout << "Escribe una expresión binaria (ejemplo: 3.0 + 4.5): ";
+    double lhs, rhs;
+    char op;
+    std::cin >> lhs >> op >> rhs;
+
+    // Crear AST para la expresión ingresada
+    auto LHS = std::make_unique<AST::NumberExpr>(lhs);
+    auto RHS = std::make_unique<AST::NumberExpr>(rhs);
+    auto Expr = std::make_unique<AST::BinaryExpr>(op, std::move(LHS), std::move(RHS));
+
+    // Generar código para la expresión
+    llvm::FunctionType *FT = llvm::FunctionType::get(llvm::Type::getDoubleTy(TheContext), false);
+    llvm::Function *F = llvm::Function::Create(FT, llvm::Function::ExternalLinkage, "example", TheModule.get());
 
     llvm::BasicBlock *BB = llvm::BasicBlock::Create(TheContext, "entry", F);
     Builder.SetInsertPoint(BB);
 
-    // Crear una expresión binaria: 3.0 + 4.5
-    auto LHS = std::make_unique<AST::NumberExpr>(3.0);
-    auto RHS = std::make_unique<AST::NumberExpr>(4.5);
-    auto Add = std::make_unique<AST::BinaryExpr>('+', std::move(LHS), std::move(RHS));
-
-    llvm::Value *RetVal = Add->codegen();
+    llvm::Value *RetVal = Expr->codegen();
     Builder.CreateRet(RetVal);
 
     // Verificar el módulo generado
