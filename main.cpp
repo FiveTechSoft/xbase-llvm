@@ -113,6 +113,11 @@ extern "C" {
     }
 }
 
+extern "C" {
+    double evaluateExpression(const char* op, const char* lhs, const char* rhs);
+    void printResult(double result);
+}
+
 // Implementaciones de codegen
 llvm::Value *AST::NumberExpr::codegen() {
     return llvm::ConstantFP::get(TheContext, llvm::APFloat(Val));
@@ -177,29 +182,29 @@ llvm::Value *AST::BinaryExpr::codegen() {
 // Función para procesar expresiones
 void processLine(const std::string &line) {
     if (line[0] == '?') {
-        // Procesar expresión
+        // Process expression
         std::istringstream iss(line.substr(1));
         std::string expr;
         std::getline(iss >> std::ws, expr);
 
-        // Dividir la expresión en partes
+        // Split the expression into parts
         std::istringstream expr_stream(expr);
         std::string lhs, rhs;
         char op = 0;
         expr_stream >> lhs;
         if (expr_stream >> op >> rhs) {
-            // Expresión binaria
+            // Binary expression
             if (NamedValues.find(lhs) == NamedValues.end() || NamedValues.find(rhs) == NamedValues.end()) {
-                std::cerr << "Variable no definida.\n";
+                std::cerr << "Undefined variable.\n";
                 return;
             }
 
-            // Crear AST para la expresión binaria
+            // Create AST for the binary expression
             auto LHS = std::make_unique<AST::VariableExpr>(lhs);
             auto RHS = std::make_unique<AST::VariableExpr>(rhs);
             auto Expr = std::make_unique<AST::BinaryExpr>(op, std::move(LHS), std::move(RHS));
 
-            // Generar código para la expresión
+            // Generate code for the expression
             llvm::FunctionType *FT = llvm::FunctionType::get(llvm::Type::getVoidTy(TheContext), false);
             llvm::Function *F = llvm::Function::Create(FT, llvm::Function::ExternalLinkage, "example", TheModule.get());
 
@@ -208,70 +213,97 @@ void processLine(const std::string &line) {
 
             llvm::Value *Result = Expr->codegen();
             
-            // Llamar a una función de runtime para imprimir el resultado
-            llvm::Function *PrintFunc = TheModule->getFunction("print_result");
-            if (!PrintFunc) {
-                llvm::FunctionType *PrintFT = llvm::FunctionType::get(llvm::Type::getVoidTy(TheContext), {llvm::Type::getInt8PtrTy(TheContext)}, false);
-                PrintFunc = llvm::Function::Create(PrintFT, llvm::Function::ExternalLinkage, "print_result", TheModule.get());
+if (Result) {
+        // Call runtime function to print the result
+        llvm::Function *PrintFunc = TheModule->getFunction("print_result");
+        if (!PrintFunc) {
+            llvm::FunctionType *PrintFT = llvm::FunctionType::get(llvm::Type::getVoidTy(TheContext), {llvm::Type::getInt8PtrTy(TheContext)}, false);
+            PrintFunc = llvm::Function::Create(PrintFT, llvm::Function::ExternalLinkage, "print_result", TheModule.get());
+        }
+        Builder.CreateCall(PrintFunc, {Result});
+        Builder.CreateRetVoid();
+
+        // Verify the generated function
+        if (llvm::verifyFunction(*F, &llvm::errs())) {
+            std::cerr << "Error: Invalid function generated\n";
+            F->eraseFromParent();
+            return;
+        }
+
+        // Print the generated IR
+        TheModule->print(llvm::outs(), nullptr);
+
+        std::cout << "Finalizing object..." << std::endl;
+        TheExecutionEngine->finalizeObject();
+
+        std::cout << "Retrieving function..." << std::endl;
+        llvm::Function *CompiledF = TheExecutionEngine->FindFunctionNamed("example");
+        if (!CompiledF) {
+            std::cerr << "Error: Failed to retrieve compiled function\n";
+            
+            // Print all function names in the module
+            std::cout << "Functions in the module:" << std::endl;
+            for (auto &Func : TheModule->getFunctionList()) {
+                std::cout << Func.getName().str() << std::endl;
             }
-            Builder.CreateCall(PrintFunc, {Result});
+            
+            return;
+        }
 
-            Builder.CreateRetVoid();
+        std::cout << "Running function..." << std::endl;
+        std::vector<llvm::GenericValue> NoArgs;
+        TheExecutionEngine->runFunction(CompiledF, NoArgs);
 
-            // Verificar el módulo generado
-            llvm::verifyFunction(*F);
-
-            // Imprimir el IR generado
-            TheModule->print(llvm::outs(), nullptr);
-
-            // Ejecutar la función generada
-            TheExecutionEngine->finalizeObject();
-            std::vector<llvm::GenericValue> noargs;
-            TheExecutionEngine->runFunction(F, noargs);
+        // Remove the function from the module to avoid name conflicts in future compilations
+        F->eraseFromParent();
+    } else {
+        std::cerr << "Error: Failed to generate code for expression\n";
+        F->eraseFromParent();
+    }
         } else {
-            // Expresión de una sola variable
+            // Single variable expression
             if (NamedValues.find(lhs) == NamedValues.end()) {
-                std::cerr << "Variable no definida.\n";
+                std::cerr << "Undefined variable.\n";
                 return;
             }
 
-            // Imprimir el valor de la variable
+            // Print the variable's value
             const Value& val = NamedValues[lhs];
             if (val.type == Value::Number) {
-                std::cout << "Valor de " << lhs << ": " << val.numVal << std::endl;
+                std::cout << "Value of " << lhs << ": " << val.numVal << std::endl;
             } else {
-                std::cout << "Valor de " << lhs << ": \"" << *val.strVal << "\"" << std::endl;
+                std::cout << "Value of " << lhs << ": \"" << *val.strVal << "\"" << std::endl;
             }
         }
     } else {
-        // Asignación de variable
+        // Variable assignment
         std::istringstream iss(line);
         std::string name;
         std::string equals;
         std::string value;
         
         if (!(iss >> name >> equals >> value) || equals != "=") {
-            std::cerr << "Formato de asignación inválido.\n";
+            std::cerr << "Invalid assignment format.\n";
             return;
         }
 
-        // Determinar si el valor es un número o una cadena
+        // Determine if the value is a number or a string
         try {
             double numVal = std::stod(value);
             NamedValues[name] = Value(numVal);
-            std::cout << "Asignado " << name << " = " << numVal << std::endl;
+            std::cout << "Assigned " << name << " = " << numVal << std::endl;
         } catch (const std::invalid_argument&) {
-            // Si no es un número, asumimos que es una cadena
+            // If not a number, assume it's a string
             if (value.front() == '"' && value.back() == '"') {
-                // Eliminar las comillas
+                // Remove the quotes
                 value = value.substr(1, value.length() - 2);
                 NamedValues[name] = Value(value);
-                std::cout << "Asignado " << name << " = \"" << value << "\"" << std::endl;
+                std::cout << "Assigned " << name << " = \"" << value << "\"" << std::endl;
             } else {
-                std::cerr << "Valor de cadena inválido. Debe estar entre comillas.\n";
+                std::cerr << "Invalid string value. Must be enclosed in quotes.\n";
             }
         } catch (const std::out_of_range&) {
-            std::cerr << "Número fuera de rango.\n";
+            std::cerr << "Number out of range.\n";
         }
     }
 }
@@ -294,11 +326,9 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    // Recreate the module since it was moved
+    // Recreate the module
     TheModule = std::make_unique<llvm::Module>("xBase Compiler", TheContext);
-    TheExecutionEngine->addModule(std::move(TheModule));
-    TheModule = TheExecutionEngine->removeModule(TheExecutionEngine->addModule());
-
+    
     // Add global mappings for runtime functions
     TheExecutionEngine->addGlobalMapping("concat_strings", reinterpret_cast<uint64_t>(concat_strings));
     TheExecutionEngine->addGlobalMapping("print_result", reinterpret_cast<uint64_t>(print_result));
