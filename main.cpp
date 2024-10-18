@@ -170,7 +170,7 @@ llvm::Value *AST::BinaryExpr::codegen() {
             llvm::FunctionType *FT = llvm::FunctionType::get(llvm::Type::getInt8PtrTy(TheContext), ArgTypes, false);
             ConcatFunc = llvm::Function::Create(FT, llvm::Function::ExternalLinkage, "concat_strings", TheModule.get());
         }
-        return Builder.CreateCall(ConcatFunc, {L, R}, "concattmp");
+        return Builder.CreateCall(ConcatFunc, {L, R}, "concat_strings");
     }
     else {
         throw std::runtime_error("incompatible types for binary operation");
@@ -180,81 +180,84 @@ llvm::Value *AST::BinaryExpr::codegen() {
 // Función para procesar expresiones
 void processLine(const std::string &line) {
     if (line[0] == '?') {
-        // Procesar expresión
         std::istringstream iss(line.substr(1));
         std::string expr;
         std::getline(iss >> std::ws, expr);
 
-        // Dividir la expresión en partes
         std::istringstream expr_stream(expr);
         std::string lhs, rhs;
         char op = 0;
         expr_stream >> lhs;
         if (expr_stream >> op >> rhs) {
-            // Expresión binaria
             if (NamedValues.find(lhs) == NamedValues.end() || NamedValues.find(rhs) == NamedValues.end()) {
                 std::cerr << "Variable no definida.\n";
                 return;
             }
 
-            // Crear AST para la expresión binaria
+            // Crear un nuevo módulo para esta expresión
+            TheModule = std::make_unique<llvm::Module>("xBase Compiler", TheContext);
+            
+            // Recrear las declaraciones de las funciones externas
+            llvm::FunctionType *ConcatFT = llvm::FunctionType::get(
+                llvm::Type::getInt8PtrTy(TheContext),
+                {llvm::Type::getInt8PtrTy(TheContext), llvm::Type::getInt8PtrTy(TheContext)},
+                false);
+            llvm::Function::Create(ConcatFT, llvm::Function::ExternalLinkage,
+                                 "concat_strings", TheModule.get());
+
+            llvm::FunctionType *PrintFT = llvm::FunctionType::get(
+                llvm::Type::getVoidTy(TheContext),
+                {llvm::Type::getInt8PtrTy(TheContext)},
+                false);
+            llvm::Function::Create(PrintFT, llvm::Function::ExternalLinkage,
+                                 "print_result", TheModule.get());
+
+            // Crear AST y generar código
             auto LHS = std::make_unique<AST::VariableExpr>(lhs);
             auto RHS = std::make_unique<AST::VariableExpr>(rhs);
             auto Expr = std::make_unique<AST::BinaryExpr>(op, std::move(LHS), std::move(RHS));
 
-            // Generar código para la expresión
             llvm::FunctionType *FT = llvm::FunctionType::get(llvm::Type::getVoidTy(TheContext), false);
-            llvm::Function *F = llvm::Function::Create(FT, llvm::Function::ExternalLinkage, 
+            llvm::Function *F = llvm::Function::Create(FT, llvm::Function::ExternalLinkage,
                 "example_func", TheModule.get());
 
             llvm::BasicBlock *BB = llvm::BasicBlock::Create(TheContext, "entry", F);
             Builder.SetInsertPoint(BB);
 
             llvm::Value *Result = Expr->codegen();
-            
-            // Llamar a print_result
-            llvm::Function *PrintFunc = TheModule->getFunction("print_result");
-            if (!PrintFunc) {
-                llvm::FunctionType *PrintFT = llvm::FunctionType::get(
-                    llvm::Type::getVoidTy(TheContext), 
-                    {llvm::Type::getInt8PtrTy(TheContext)}, 
-                    false);
-                PrintFunc = llvm::Function::Create(PrintFT, 
-                    llvm::Function::ExternalLinkage, 
-                    "print_result", 
-                    TheModule.get());
-            }
-            Builder.CreateCall(PrintFunc, {Result});
+            Builder.CreateCall(TheModule->getFunction("print_result"), {Result});
             Builder.CreateRetVoid();
 
-            // Verificar la función generada
+            // Verificar y mostrar el IR
             llvm::verifyFunction(*F);
-
-            // Imprimir el IR generado
             TheModule->print(llvm::outs(), nullptr);
 
-            // Finalizar el objeto y obtener un puntero a la función compilada
+            // Añadir el módulo al motor de ejecución
+            TheExecutionEngine->addModule(std::move(TheModule));
             TheExecutionEngine->finalizeObject();
-            
-            // Obtener un puntero a la función compilada
-            void (*FP)() = (void (*)())(intptr_t)
-                TheExecutionEngine->getFunctionAddress("example_func");
-                
-            if (FP) {
-                // Ejecutar la función
+
+            // Obtener y ejecutar la función
+            uint64_t FPtr = TheExecutionEngine->getFunctionAddress("print_result");
+            if (FPtr) {
+                void (*FP)() = (void (*)())(intptr_t)FPtr;
                 FP();
+                
+                // Remover el módulo después de la ejecución
+                // TheExecutionEngine->removeModule(H);
             } else {
                 std::cerr << "Error: No se pudo obtener la función compilada\n";
             }
 
+            // Crear un nuevo módulo para la siguiente operación
+            TheModule = std::make_unique<llvm::Module>("xBase Compiler", TheContext);
+
         } else {
-            // Expresión de una sola variable
+            // Código para expresión de una sola variable (sin cambios)
             if (NamedValues.find(lhs) == NamedValues.end()) {
                 std::cerr << "Variable no definida.\n";
                 return;
             }
 
-            // Imprimir el valor de la variable
             const Value& val = NamedValues[lhs];
             if (val.type == Value::Number) {
                 std::cout << "Valor de " << lhs << ": " << val.numVal << std::endl;
@@ -263,7 +266,7 @@ void processLine(const std::string &line) {
             }
         }
     } else {
-        // Asignación de variable
+        // Código para asignación de variables (sin cambios)
         std::istringstream iss(line);
         std::string name;
         std::string equals;
@@ -274,15 +277,12 @@ void processLine(const std::string &line) {
             return;
         }
 
-        // Determinar si el valor es un número o una cadena
         try {
             double numVal = std::stod(value);
             NamedValues[name] = Value(numVal);
             std::cout << "Asignado " << name << " = " << numVal << std::endl;
         } catch (const std::invalid_argument&) {
-            // Si no es un número, asumimos que es una cadena
             if (value.front() == '"' && value.back() == '"') {
-                // Eliminar las comillas
                 value = value.substr(1, value.length() - 2);
                 NamedValues[name] = Value(value);
                 std::cout << "Asignado " << name << " = \"" << value << "\"" << std::endl;
